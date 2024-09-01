@@ -5,36 +5,38 @@ using System.Runtime.Loader;
 
 namespace CSharpScriptCompiler.Common;
 
-public class ScriptAssemblyContext(string pluginPath) : AssemblyLoadContext(isCollectible: true)
+public class ScriptAssemblyContext : AssemblyLoadContext
 {
-    private readonly AssemblyDependencyResolver _resolver = new(pluginPath);
+    private readonly AssemblyDependencyResolver _resolver;
+    private readonly Action _unload;
+
+    // Make constructor private, must be instantiated through static method
+    private ScriptAssemblyContext(string pluginPath, Action unload) : base(isCollectible: true)
+    {
+        _resolver = new(pluginPath);
+        _unload = unload;
+    }
 
     public static (ScriptAssemblyContext, Assembly?, IList<string>) LoadAndCompile(
         string pluginPath,
         string sourceCode,
         IList<string> additionalAssemblies,
+        Action unload,
         OptimizationLevel optimizationLevel = OptimizationLevel.Release)
     {
-        // Create the unloadable HostAssemblyLoadContext
-        var scriptCompiler = new ScriptAssemblyContext(pluginPath);
+        var context = new ScriptAssemblyContext(pluginPath, unload);
 
-        // Load the plugin assembly into the HostAssemblyLoadContext.
-        // NOTE: the assemblyPath must be an absolute path.
-        var (assembly, errors) = scriptCompiler.Compile(sourceCode, additionalAssemblies, optimizationLevel);
+        var (assembly, errors) = context.LoadFromSource(sourceCode, additionalAssemblies, optimizationLevel);
 
-        return (scriptCompiler, assembly, errors);
+        return (context, assembly, errors);
     }
+
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    public (Assembly?, IList<string>) Compile(string sourceCode, IList<string> additionalAssemblies, OptimizationLevel optimizationLevel = OptimizationLevel.Release)
-    {
-        var (assembly, errors) = LoadFromSource(sourceCode, optimizationLevel, additionalAssemblies);
-
-        // Return the assembly and instance
-        return (assembly, errors);
-    }
-
-    public (Assembly?, IList<string>) LoadFromSource(string sourceCode, OptimizationLevel optimizationLevel, IList<string> additionalAssemblies)
+    public (Assembly?, IList<string>) LoadFromSource(
+        string sourceCode,
+        IList<string> additionalAssemblies,
+        OptimizationLevel optimizationLevel)
     {
         var scriptCompiler = new ScriptCompiler();
 
@@ -64,9 +66,9 @@ public class ScriptAssemblyContext(string pluginPath) : AssemblyLoadContext(isCo
         return (assembly, []);
     }
 
-    private static void UnloadScript(AssemblyLoadContext obj)
+    private void UnloadScript(AssemblyLoadContext obj)
     {
-        Console.WriteLine("Releasing script resources");
+        _unload();
     }
 
     protected override Assembly? Load(AssemblyName name)

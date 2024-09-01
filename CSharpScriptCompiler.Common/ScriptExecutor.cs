@@ -8,25 +8,32 @@ public class ScriptExecutor
         string executingAssemblyPath,
         string sourceCode,
         IList<string> additionalAssemblies,
-         Func<Assembly, Task> executeScript,
+        Func<Assembly, CancellationToken, Task> executeScript,
+        Action unload,
         int unloadMaxAttempts,
-        int unloadDelayBetweenTries)
+        int unloadDelayBetweenTries,
+        CancellationToken stoppingToken = default)
     {
-        var weakRef = await Run(executingAssemblyPath, sourceCode, additionalAssemblies, executeScript);
+        var weakRef = await Run(executingAssemblyPath, sourceCode, additionalAssemblies, executeScript, unload, stoppingToken);
 
         if (weakRef != null)
         {
-            await WaitForUnload(weakRef, unloadMaxAttempts, unloadDelayBetweenTries);
+            await WaitForUnload(weakRef, unloadMaxAttempts, unloadDelayBetweenTries, stoppingToken);
         }
     }
 
     public static (ScriptAssemblyContext, Assembly?, IList<string>) Load(
         string executingAssemblyPath,
         string sourceCode,
-        IList<string> additionalAssemblies)
+        IList<string> additionalAssemblies,
+        Action unload)
     {
         var (scriptCompiler, assembly, errors) = ScriptAssemblyContext.LoadAndCompile(
-            executingAssemblyPath, sourceCode, additionalAssemblies, Microsoft.CodeAnalysis.OptimizationLevel.Debug);
+            executingAssemblyPath,
+            sourceCode,
+            additionalAssemblies,
+            unload,
+            Microsoft.CodeAnalysis.OptimizationLevel.Debug);
         return (scriptCompiler, assembly, errors);
     }
 
@@ -34,10 +41,12 @@ public class ScriptExecutor
         string executingAssemblyPath,
         string sourceCode,
         IList<string> additionalAssemmblies,
-        Func<Assembly, Task> executeScript)
+        Func<Assembly, CancellationToken, Task> executeScript,
+        Action unload,
+        CancellationToken stoppingToken = default)
     {
         // Try and load compiler and assembly
-        var (scriptCompiler, assembly, errors) = Load(executingAssemblyPath, sourceCode, additionalAssemmblies);
+        var (scriptCompiler, assembly, errors) = Load(executingAssemblyPath, sourceCode, additionalAssemmblies, unload);
 
         // Create a weak reference to the AssemblyLoadContext that will allow us to detect
         // when the unload completes.
@@ -53,7 +62,7 @@ public class ScriptExecutor
             return alcWeakRef;
         }
 
-        await executeScript(assembly);
+        await executeScript(assembly, stoppingToken);
 
         scriptCompiler.Unload();
 
@@ -63,11 +72,12 @@ public class ScriptExecutor
     public static async Task WaitForUnload(
         WeakReference weakRef,
         int maxAttempts,
-        int delayBetweenTries)
+        int delayBetweenTries,
+        CancellationToken stoppingToken)
     {
         for (var i = 0; weakRef.IsAlive && (i < maxAttempts); i++)
         {
-            await Task.Delay(delayBetweenTries);
+            await Task.Delay(delayBetweenTries, stoppingToken);
             GC.Collect();
             GC.WaitForPendingFinalizers();
         }
