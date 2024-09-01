@@ -1,46 +1,56 @@
 ﻿using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.Loader;
 
 namespace CSharpScriptCompiler.Common;
 
-public class ScriptCompiler
+public class ScriptCompiler(string pluginPath) : AssemblyLoadContext(isCollectible: true)
 {
-    /// <summary>
-    /// The type that scripts must implement to be executed
-    /// </summary>
-    private static readonly Type ScriptClassType = typeof(IScriptClass);
+    private readonly AssemblyDependencyResolver _resolver = new(pluginPath);
 
     /// <summary>
     /// The full path to the currently executing .NET framework assemblies
     /// </summary>
-    private readonly string _dotNetFrameworkAssemblyPath;
+    private readonly string _dotNetFrameworkAssemblyPath = Path.GetDirectoryName(typeof(object).Assembly.Location)!;
 
     /// <summary>
     /// The list of assembly references that are used by the script class
     /// </summary>
     private readonly IList<PortableExecutableReference> _assemblyReferences = [];
 
-    public ScriptCompiler()
+    public static (ScriptCompiler, Assembly?, IList<string>) LoadAndCompile(string pluginPath, string sourceCode, OptimizationLevel optimizationLevel = OptimizationLevel.Release)
     {
-        // Getting the assembly location of the 'object' type gets the executing framework assembly location
-        // because the 'object' type is in the .NET framework
-        _dotNetFrameworkAssemblyPath = Path.GetDirectoryName(typeof(object).Assembly.Location)!;
+        // Create the unloadable HostAssemblyLoadContext
+        var scriptCompiler = new ScriptCompiler(pluginPath);
+
+        // Load the plugin assembly into the HostAssemblyLoadContext.
+        // NOTE: the assemblyPath must be an absolute path.
+        var (assembly, errors) = scriptCompiler.Compile(sourceCode, optimizationLevel);
+
+        return (scriptCompiler, assembly, errors);
     }
 
-    public (Assembly?, IScriptClass?, IList<string>) Compile(string sourceCode, OptimizationLevel optimizationLevel = OptimizationLevel.Release)
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    public (Assembly?, IList<string>) Compile(string sourceCode, OptimizationLevel optimizationLevel = OptimizationLevel.Release)
     {
         // Add the assembly references that we need
         AddAssemblies(
             "System.Private.CoreLib.dll",
             "System.Runtime.dll",
             "System.Console.dll",
-            "netstandard.dll",
-
-            // We need the IScriptClass DLL
-            "CSharpScriptCompiler.Common.dll"
+            "netstandard.dll"
         );
 
+        var (assembly, errors) = LoadFromSource(sourceCode, optimizationLevel);
+
+        // Return the assembly and instance
+        return (assembly, errors);
+    }
+
+    public (IList<byte>, IList<string>) CompileToByteCode(string sourceCode, OptimizationLevel optimizationLevel)
+    {
         // Parse source code into a tree
         var tree = SyntaxFactory.ParseSyntaxTree(sourceCode.Trim());
 
@@ -54,52 +64,60 @@ public class ScriptCompiler
             .WithReferences(_assemblyReferences)
             .AddSyntaxTrees(tree);
 
-        Assembly? assembly = null;
+        using var inMemoryCode = new MemoryStream();
 
-        using (var inMemoryCode = new MemoryStream())
+        // Compile the code
+        var compilationResult = compilation.Emit(inMemoryCode);
+
+        // If there were errors then we return the error lines
+        if (!compilationResult.Success)
         {
-            // Compile the code
-            var compilationResult = compilation.Emit(inMemoryCode);
+            IList<string> errorLines = [];
 
-            // If there were errors then we return the error lines
-            if (!compilationResult.Success)
+            foreach (var diagnostic in compilationResult.Diagnostics)
             {
-                IList<string> errorLines = [];
-
-                foreach (var diagnostic in compilationResult.Diagnostics)
-                {
-                    errorLines.Add(diagnostic.ToString());
-                }
-
-                return (null, null, errorLines);
+                errorLines.Add(diagnostic.ToString());
             }
 
-            // Load raw compiled code (bytecode) into an assembly
-            var bytecode = inMemoryCode.ToArray();
-            assembly = Assembly.Load(bytecode);
+            return ([], errorLines);
         }
 
-        // If we failed to load in memory code then there was some error, shouldn't normally
-        // occur unles there is some sort of transient error (like low memory on the machine)
-        if (assembly == null)
+        var byteCode = inMemoryCode.ToArray();
+
+        return (byteCode, []);
+    }
+
+    public (Assembly?, IList<string>) LoadFromSource(string sourceCode, OptimizationLevel optimizationLevel)
+    {
+        var (byteCode, errors) = CompileToByteCode(sourceCode, optimizationLevel);
+
+        if (errors.Count > 0)
         {
-            return (null, null, ["Failed to compile and load compiled assembly"]);
+            return (null, errors);
         }
 
-        // Get all of the types that implment IScriptClass
-        var types = assembly.GetTypes().Where(ScriptClassType.IsAssignableFrom).ToList();
+        using var byteStream = new MemoryStream((byte[])byteCode);
 
-        // There must be exactly one type (else it is an error)
-        if (types == null || types.Count != 1)
+        // Load assembly from COFF memory stream
+        var assembly = LoadFromStream(byteStream);
+
+        if (assembly != null)
         {
-            return (null, null, [$"There must be exactly one class that implements the interface '{nameof(IScriptClass)}'"]);
+            // Hook into unloading event
+            var currentContext = GetLoadContext(assembly);
+            if (currentContext != null)
+            {
+                currentContext.Unloading += UnloadScript;
+            }
         }
 
-        // Instantiate the class
-        var instance = (IScriptClass?)assembly.CreateInstance(types[0].FullName!);
+        // Return loaded assembly (and empty error list)
+        return (assembly, []);
+    }
 
-        // Return the assembly and instance
-        return (assembly, instance, []);
+    private static void UnloadScript(AssemblyLoadContext obj)
+    {
+        Console.WriteLine("Releasing script resources");
     }
 
     public bool AddAssembly(string assemblyDllFileName)
@@ -160,5 +178,19 @@ public class ScriptCompiler
 
         // Return any assemblies that have failed
         return failedAssemblies;
+    }
+
+    protected override Assembly? Load(AssemblyName name)
+    {
+        Console.WriteLine(name);
+
+        var assemblyPath = _resolver.ResolveAssemblyToPath(name);
+        if (assemblyPath != null)
+        {
+            Console.WriteLine($"Loading assembly {assemblyPath} into the ScriptCompiler");
+            return LoadFromAssemblyPath(assemblyPath);
+        }
+
+        return null;
     }
 }
