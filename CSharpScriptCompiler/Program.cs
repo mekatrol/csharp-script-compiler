@@ -7,7 +7,7 @@ internal class Program
 {
     static async Task Main()
     {
-        var source = @"
+        var sourceCode = @"
 using System;
 using System.Threading.Tasks;
 
@@ -23,9 +23,32 @@ public class MyScriptClass
 ";
 
         var currentAssemblyDirectory = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
+        var executingAssemblyPath = Path.GetFullPath(currentAssemblyDirectory);
 
-        var pluginFullPath = Path.GetFullPath(Path.Combine(currentAssemblyDirectory, $"..\\..\\..\\..\\Plugin\\bin\\Debug\\net8.0\\Plugin.dll"));
+        await ScriptExecutor.RunAndUnload(
+            executingAssemblyPath,
+            sourceCode,
+            additionalAssemblies: ["System.Private.CoreLib.dll"],
+            executeScript: async (assembly) =>
+            {
+                // Get the plugin interface by calling the PluginClass.GetInterface method via reflection.
+                var scriptType = assembly.GetType("MyScriptNamespace.MyScriptClass") ?? throw new Exception("MyScriptNamespace.MyScriptClass");
 
-        await ScriptExecutor.RunAndUnload(pluginFullPath, source, unloadMaxAttempts: 10, unloadDelayBetweenTries: 100);
+                var instance = Activator.CreateInstance(scriptType, true);
+
+                // Call script if not null an no errors
+                if (instance != null)
+                {
+                    var execute = scriptType.GetMethod("Execute", BindingFlags.Instance | BindingFlags.Public) ?? throw new Exception("Execute");
+
+                    // Now we can call methods of the plugin using the interface
+                    var executor = (Task<string>?)execute.Invoke(instance, ["queen"]);
+                    var message = await executor!;
+
+                    Console.WriteLine(message);
+                }
+            },
+            unloadMaxAttempts: 10,
+            unloadDelayBetweenTries: 100);
     }
 }

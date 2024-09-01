@@ -4,9 +4,15 @@ namespace CSharpScriptCompiler.Common;
 
 public class ScriptExecutor
 {
-    public static async Task RunAndUnload(string pluginFullPath, string source, int unloadMaxAttempts, int unloadDelayBetweenTries)
+    public static async Task RunAndUnload(
+        string executingAssemblyPath,
+        string sourceCode,
+        IList<string> additionalAssemblies,
+         Func<Assembly, Task> executeScript,
+        int unloadMaxAttempts,
+        int unloadDelayBetweenTries)
     {
-        var weakRef = await Run(pluginFullPath, source);
+        var weakRef = await Run(executingAssemblyPath, sourceCode, additionalAssemblies, executeScript);
 
         if (weakRef != null)
         {
@@ -14,16 +20,24 @@ public class ScriptExecutor
         }
     }
 
-    public static (ScriptCompiler, Assembly?, IList<string>) Load(string pluginFullPath, string source)
+    public static (ScriptAssemblyContext, Assembly?, IList<string>) Load(
+        string executingAssemblyPath,
+        string sourceCode,
+        IList<string> additionalAssemblies)
     {
-        var (scriptCompiler, assembly, errors) = ScriptCompiler.LoadAndCompile(pluginFullPath, source, Microsoft.CodeAnalysis.OptimizationLevel.Debug);
+        var (scriptCompiler, assembly, errors) = ScriptAssemblyContext.LoadAndCompile(
+            executingAssemblyPath, sourceCode, additionalAssemblies, Microsoft.CodeAnalysis.OptimizationLevel.Debug);
         return (scriptCompiler, assembly, errors);
     }
 
-    public static async Task<WeakReference?> Run(string pluginFullPath, string source)
+    public static async Task<WeakReference?> Run(
+        string executingAssemblyPath,
+        string sourceCode,
+        IList<string> additionalAssemmblies,
+        Func<Assembly, Task> executeScript)
     {
         // Try and load compiler and assembly
-        var (scriptCompiler, assembly, errors) = Load(pluginFullPath, source);
+        var (scriptCompiler, assembly, errors) = Load(executingAssemblyPath, sourceCode, additionalAssemmblies);
 
         // Create a weak reference to the AssemblyLoadContext that will allow us to detect
         // when the unload completes.
@@ -39,29 +53,17 @@ public class ScriptExecutor
             return alcWeakRef;
         }
 
-        // Get the plugin interface by calling the PluginClass.GetInterface method via reflection.
-        var scriptType = assembly.GetType("MyScriptNamespace.MyScriptClass") ?? throw new Exception("MyScriptNamespace.MyScriptClass");
+        await executeScript(assembly);
 
-        var instance = Activator.CreateInstance(scriptType, true);
-
-        // Call script if not null an no errors
-        if (instance != null)
-        {
-            var execute = scriptType.GetMethod("Execute", BindingFlags.Instance | BindingFlags.Public) ?? throw new Exception("Execute");
-
-            // Now we can call methods of the plugin using the interface
-            var executor = (Task<string>?)execute.Invoke(instance, ["queen"]);
-            var message = (string?)await executor!;
-
-            Console.WriteLine(message);
-
-            scriptCompiler.Unload();
-        }
+        scriptCompiler.Unload();
 
         return alcWeakRef;
     }
 
-    public static async Task WaitForUnload(WeakReference weakRef, int maxAttempts, int delayBetweenTries)
+    public static async Task WaitForUnload(
+        WeakReference weakRef,
+        int maxAttempts,
+        int delayBetweenTries)
     {
         for (var i = 0; weakRef.IsAlive && (i < maxAttempts); i++)
         {
